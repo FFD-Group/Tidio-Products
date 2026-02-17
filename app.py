@@ -1,3 +1,4 @@
+import time
 from dotenv import load_dotenv
 import logging
 import json
@@ -22,7 +23,7 @@ file_handler = logging.FileHandler("tidio_products.log")
 file_handler.setFormatter(formatter)
 
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 logger.addHandler(stream_handler)
 logger.addHandler(file_handler)
 
@@ -37,9 +38,7 @@ TIDIO_RATELIMIT_REMAINING_KEY = "x-ratelimit-remaining"
 TIDIO_ACCEPT_API_VERSION = os.getenv("TIDIO_ACCEPT_API_VERSION")
 TIDIO_API_UPSERT_PRODUCT_ENDPOINT = "https://api.tidio.com/products/batch"
 TIDIO_API_DELETE_PRODUCT_ENDPOINT = "https://api.tidio.com/products/"
-ACCEPT_HEADER_VALUE = (
-    f"Accept: application/json; version={TIDIO_ACCEPT_API_VERSION}"
-)
+ACCEPT_HEADER_VALUE = f"application/json; version={TIDIO_ACCEPT_API_VERSION}"
 
 # Magento
 MAGENTO_API_DOMAIN = os.getenv("WEB_API_DOMAIN")
@@ -75,9 +74,9 @@ class MagentoCatalog:
             "fields": self.mag_product_fields,
         }
         self.mag_products_updated_criteria = {
-            "searchCriteria[filter_groups][0][filters][0][field]": "updated_at",
-            "searchCriteria[filter_groups][0][filters][0][value]": None,
-            "searchCriteria[filter_groups][0][filters][0][condition_type]": "gteq",
+            "searchCriteria[filter_groups][2][filters][0][field]": "updated_at",
+            "searchCriteria[filter_groups][2][filters][0][value]": None,
+            "searchCriteria[filter_groups][2][filters][0][condition_type]": "gteq",
         }
         self.mag_products_ep = MAGENTO_API_DOMAIN + os.getenv(
             "MAG_PRODUCTS_API_ENDPOINT"
@@ -103,7 +102,7 @@ class MagentoCatalog:
             updated_after = time_now.subtract(minutes=int(UPDATE_AGE_MINS))
             updated_after_str = updated_after.to_datetime_string()
             product_criteria[
-                "searchCriteria[filter_groups][0][filters][0][value]"
+                "searchCriteria[filter_groups][2][filters][0][value]"
             ] = updated_after_str
 
         raw_order_response = requests.get(
@@ -171,6 +170,11 @@ class MagentoCatalog:
                 return f"{MAGENTO_DOMAIN}/media/catalog/product/{media['file']}"
         return None
 
+    def determine_web_product_url(self, product: dict) -> str:
+        if not isinstance(product, dict) or not product:
+            raise ValueError("Please provide a product dictionary.")
+        return self.fetch_web_product_attribute_value("url_key", product)
+
     def fetch_web_product_attribute_value(
         self, attribute: str, product: dict
     ) -> str:
@@ -190,7 +194,7 @@ class MagentoCatalog:
             if product_attribute["attribute_code"] == attribute:
                 return product_attribute["value"]
         raise ValueError(
-            "Product custom attributes do not include a {attribute}."
+            "Product custom attributes do not include a '{attribute}'."
         )
 
     def fetch_web_category_name(self, category_id: int | str) -> str:
@@ -304,42 +308,90 @@ class MagentoCatalog:
         return features
 
 
+class TidioAPI:
+
+    def __init__(self):
+        self.headers = {
+            TIDIO_CLIENT_KEY: TIDIO_CLIENT_ID,
+            TIDIO_CLIENT_SECRET_KEY: TIDIO_CLIENT_SECRET,
+            "accept": ACCEPT_HEADER_VALUE,
+            "content-type": f"application/json; version={TIDIO_ACCEPT_API_VERSION}",
+        }
+        self.last_request_time = None
+
+    def upsert_product_batch(self, products: list):
+        if not isinstance(products, list) or not products:
+            raise ValueError("Please provide products to upsert.")
+        number_of_products = len(products)
+        if number_of_products > 100:
+            raise ValueError(
+                f"Too many products in upsert to Tidio API. Maximum 100 per request, found {number_of_products}."
+            )
+        if self.last_request_time:
+            time_now = pendulum.now("Europe/London")
+            if time_now <= self.last_request_time.subtract(seconds=7):
+                time.sleep(7)
+        self.last_request_time = pendulum.now("Europe/London")
+        payload = json.dumps({"products": products})
+        raw_response = requests.put(
+            TIDIO_API_UPSERT_PRODUCT_ENDPOINT,
+            headers=self.headers,
+            data=payload,
+        )
+        if raw_response.status_code == 400:
+            logger.error("Upsert failed with HTTP Error 400.")
+            raise requests.HTTPError("Bad request, check the payload.")
+        logger.info(
+            f"Upserted batch of {number_of_products} products to Tidio API."
+        )
+        logger.debug(raw_response)
+        logger.debug(raw_response.content)
+
+
 if __name__ == "__main__":
     magento = MagentoCatalog()
     updates = magento.fetch_web_products()
     output_json = []
-    for product in updates:
-        product_categories = []
-        for attribute in product["custom_attributes"]:
-            if attribute["attribute_code"] == "category_ids":
-                for id in attribute["value"]:
-                    category_name = magento.fetch_web_category_name(id)
-                    product_categories.append(category_name)
-        tidio_product = {
-            "id": product["id"],
-            "sku": product["sku"],
-            "title": product["name"],
-            "status": magento.determine_web_product_status(product),
-            "updated_at": magento.iso8601_format_updated_at(
-                product["updated_at"]
-            ),
-            "image_url": magento.determine_web_product_image_url(
-                product["media_gallery_entries"]
-            ),
-            "features": magento.extract_features(product),
-            "description": magento.fetch_web_product_attribute_value(
-                "description", product
-            ),
-            "vendor": magento.fetch_web_atrribute_value_label(
-                MAG_BRAND_ATTRIBUTE_CODE,
-                magento.fetch_web_product_attribute_value(
-                    MAG_BRAND_ATTRIBUTE_CODE, product
-                ),
-            ),
-            "product_type": product_categories[-1],
-            "price": magento.determine_web_product_price(product),
-        }
-        output_json.append(tidio_product)
-        print(product["sku"])
-    with open("output.json", "w") as output_file:
-        output_file.write(json.dumps(output_json))
+    # for product in updates:
+    #     product_categories = []
+    #     for attribute in product["custom_attributes"]:
+    #         if attribute["attribute_code"] == "category_ids":
+    #             for id in attribute["value"]:
+    #                 category_name = magento.fetch_web_category_name(id)
+    #                 product_categories.append(category_name)
+    #     tidio_product = {
+    #         "id": product["id"],
+    #         "url": f"{MAGENTO_DOMAIN}/{magento.determine_web_product_url(product)}",
+    #         "sku": product["sku"],
+    #         "title": product["name"],
+    #         "status": magento.determine_web_product_status(product),
+    #         "updated_at": magento.iso8601_format_updated_at(
+    #             product["updated_at"]
+    #         ),
+    #         "image_url": magento.determine_web_product_image_url(
+    #             product["media_gallery_entries"]
+    #         ),
+    #         "features": magento.extract_features(product),
+    #         "description": magento.fetch_web_product_attribute_value(
+    #             "description", product
+    #         ),
+    #         "default_currency": "GBP",
+    #         "vendor": magento.fetch_web_atrribute_value_label(
+    #             MAG_BRAND_ATTRIBUTE_CODE,
+    #             magento.fetch_web_product_attribute_value(
+    #                 MAG_BRAND_ATTRIBUTE_CODE, product
+    #             ),
+    #         ),
+    #         "product_type": product_categories[-1],
+    #         "price": magento.determine_web_product_price(product),
+    #     }
+    #     output_json.append(tidio_product)
+    #     print(product["sku"])
+    # with open("output.json", "w") as output_file:
+    #     output_file.write(json.dumps(output_json))
+
+    with open("output.json", "r") as input_file:
+        products = json.loads(input_file.read())
+
+    tidio = TidioAPI()
+    tidio.upsert_product_batch(products)
