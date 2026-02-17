@@ -22,7 +22,7 @@ file_handler = logging.FileHandler("tidio_products.log")
 file_handler.setFormatter(formatter)
 
 logger = logging.getLogger()
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 logger.addHandler(stream_handler)
 logger.addHandler(file_handler)
 
@@ -46,6 +46,8 @@ MAGENTO_API_DOMAIN = os.getenv("WEB_API_DOMAIN")
 MAGENTO_DOMAIN = os.getenv("WEB_DOMAIN")
 TIMEZONE = pendulum.timezone("Europe/London")
 UPDATE_AGE_MINS = os.getenv("UPDATE_AGE_MINS")
+EXCLUDED_FEATURES = json.loads(os.getenv("EXCLUDED_FEATURES"))
+MAG_BRAND_ATTRIBUTE_CODE = os.getenv("MAG_BRAND_ATTRIBUTE_CODE")
 
 
 class MagentoCatalog:
@@ -64,8 +66,11 @@ class MagentoCatalog:
             + ",errors,message,code,trace,parameters,total_count"
         )
         self.mag_product_criteria = {
-            "searchCriteria[filter_groups][1][filters][0][field]": "status",
-            "searchCriteria[filter_groups][1][filters][0][value]": 1,
+            "searchCriteria[filter_groups][0][filters][0][field]": "status",
+            "searchCriteria[filter_groups][0][filters][0][value]": 1,  # enabled
+            "searchCriteria[filter_groups][0][filters][0][condition_type]": "eq",
+            "searchCriteria[filter_groups][1][filters][0][field]": "visibility",
+            "searchCriteria[filter_groups][1][filters][0][value]": 4,  # catalog, search
             "searchCriteria[filter_groups][1][filters][0][condition_type]": "eq",
             "fields": self.mag_product_fields,
         }
@@ -80,7 +85,15 @@ class MagentoCatalog:
         self.mag_categories_ep = MAGENTO_API_DOMAIN + os.getenv(
             "MAG_CATEGORIES_API_ENDPOINT"
         )
+        self.mag_prices_ep = MAGENTO_API_DOMAIN + os.getenv(
+            "MAG_PRICES_API_ENDPOINT"
+        )
+        self.mag_attribute_ep = MAGENTO_API_DOMAIN + os.getenv(
+            "MAG_ATTRIBUTE_API_ENDPOINT"
+        )
+        self.mag_store_id = os.getenv("MAG_STORE_ID")
         self.category_id_name_map = {}
+        self.attribute_value_label_map = {}
 
     def fetch_web_products(self, full: bool = False) -> list:
         product_criteria = self.mag_product_criteria
@@ -147,17 +160,15 @@ class MagentoCatalog:
         return product_updated_at.to_datetime_string()
 
     def determine_web_product_image_url(
-        self, product_media: dict
+        self, product_media: list
     ) -> str | None:
-        if not isinstance(product_media, dict) or not product_media:
+        if not isinstance(product_media, list) or not product_media:
             raise ValueError("Provide the product's 'media_gallery_entries'.")
         if len(product_media) == 0:
             return None
         for media in product_media:
             if "image" in media["types"]:
-                return (
-                    f"{MAGENTO_DOMAIN}/media/catalog/products/{media['file']}"
-                )
+                return f"{MAGENTO_DOMAIN}/media/catalog/product/{media['file']}"
         return None
 
     def fetch_web_product_attribute_value(
@@ -209,12 +220,126 @@ class MagentoCatalog:
 
         return category_name
 
-    def determine_web_product_price(self, product: dict) -> float:
-        # How?
-        pass
+    def determine_web_product_price(self, product: dict) -> float | str:
+        if not isinstance(product, dict) or not product:
+            raise ValueError(
+                "Please provide a product dictionary to determine price."
+            )
+        if "custom_attributes" in product:
+            poa = [
+                attr["value"]
+                for attr in product["custom_attributes"]
+                if attr["attribute_code"] == "priceonapplication"
+            ][0]
+            if int(poa) == 1:
+                return "null"
+        criteria = {
+            "searchCriteria[filter_groups][0][filters][0][field]": "sku",
+            "searchCriteria[filter_groups][0][filters][0][value]": product[
+                "sku"
+            ],
+            "store_id": self.mag_store_id,
+            "currencyCode": "GBP",
+            "fields": "items[price_info]",
+        }
+        prices_endpoint = f"{self.mag_prices_ep}"
+        raw_prices_response = requests.get(
+            prices_endpoint, headers=self.mag_headers, params=criteria
+        )
+        json_response = raw_prices_response.json()
+        if not json_response["items"]:
+            return "null"
+        return json_response["items"][0]["price_info"]["extension_attributes"][
+            "tax_adjustments"
+        ]["final_price"]
+
+    def fetch_web_atrribute_value_label(
+        self, attribute_code: str, option_id: int | str
+    ) -> str | None:
+        # memoization
+        key = attribute_code + str(option_id)
+        if key in self.attribute_value_label_map:
+            return self.attribute_value_label_map[key]
+        if not isinstance(attribute_code, str) or not attribute_code:
+            raise ValueError("Please provide an attribute code.")
+        if not option_id or (
+            not isinstance(option_id, int) and not isinstance(option_id, str)
+        ):
+            raise ValueError(
+                "Please provide an option id (int or str) to return the label of."
+            )
+        attribute_endpoint = f"{self.mag_attribute_ep}{attribute_code}/options"
+        raw_attribute_response = requests.get(
+            attribute_endpoint, headers=self.mag_headers
+        )
+        json_response = raw_attribute_response.json()
+        label = [
+            opt["label"]
+            for opt in json_response
+            if opt["value"] == str(option_id)
+        ]
+        if len(label) == 0:
+            self.attribute_value_label_map[key] = None  # memoize
+            return None
+        self.attribute_value_label_map[key] = label[0]  # memoize
+        return label[0]
+
+    def extract_features(self, product: dict) -> dict:
+        if not isinstance(product, dict) or not dict:
+            raise ValueError(
+                "Please provide a product dictionary to extract features."
+            )
+        custom_attributes = product["custom_attributes"]
+        features = {}
+        for attr in custom_attributes:
+            if attr["attribute_code"] in EXCLUDED_FEATURES:
+                continue
+            if attr["value"]:
+                label = self.fetch_web_atrribute_value_label(
+                    attr["attribute_code"], attr["value"]
+                )
+                value = label if label else attr["value"]
+                key = attr["attribute_code"].replace("filt_", "")
+                features[key] = value
+        return features
 
 
 if __name__ == "__main__":
     magento = MagentoCatalog()
     updates = magento.fetch_web_products()
-    print(updates[0])
+    output_json = []
+    for product in updates:
+        product_categories = []
+        for attribute in product["custom_attributes"]:
+            if attribute["attribute_code"] == "category_ids":
+                for id in attribute["value"]:
+                    category_name = magento.fetch_web_category_name(id)
+                    product_categories.append(category_name)
+        tidio_product = {
+            "id": product["id"],
+            "sku": product["sku"],
+            "title": product["name"],
+            "status": magento.determine_web_product_status(product),
+            "updated_at": magento.iso8601_format_updated_at(
+                product["updated_at"]
+            ),
+            "image_url": magento.determine_web_product_image_url(
+                product["media_gallery_entries"]
+            ),
+            "features": magento.extract_features(product),
+            "description": magento.fetch_web_product_attribute_value(
+                "description", product
+            ),
+            "vendor": magento.fetch_web_atrribute_value_label(
+                MAG_BRAND_ATTRIBUTE_CODE,
+                magento.fetch_web_product_attribute_value(
+                    MAG_BRAND_ATTRIBUTE_CODE, product
+                ),
+            ),
+            "product_type": product_categories[-1],
+            "price": magento.determine_web_product_price(product),
+        }
+        output_json.append(tidio_product)
+        print(product["sku"])
+    with open("output.json", "w") as output_file:
+        output_file.write(json.dumps(output_json))
