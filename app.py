@@ -359,57 +359,70 @@ class TidioAPI:
 
 
 def parse_and_write_magento_products(full: bool = False) -> None:
-    magento = MagentoCatalog()
-    updates = magento.fetch_web_products(full)
-    output_json = []
-    for product in updates:
-        product_categories = []
-        for attribute in product["custom_attributes"]:
-            if attribute["attribute_code"] == "category_ids":
-                for id in attribute["value"]:
-                    category_name = magento.fetch_web_category_name(id)
-                    product_categories.append(category_name)
-        tidio_product = {
-            "id": product["id"],
-            "url": f"{MAGENTO_DOMAIN}/{magento.determine_web_product_url(product)}",
-            "sku": product["sku"],
-            "title": product["name"],
-            "status": magento.determine_web_product_status(product),
-            "updated_at": magento.iso8601_format_updated_at(
-                product["updated_at"]
-            ),
-            "image_url": magento.determine_web_product_image_url(
-                product["media_gallery_entries"]
-            ),
-            "features": magento.extract_features(product),
-            "description": magento.fetch_web_product_attribute_value(
-                "description", product
-            ),
-            "default_currency": "GBP",
-            "vendor": magento.fetch_web_atrribute_value_label(
-                MAG_BRAND_ATTRIBUTE_CODE,
-                magento.fetch_web_product_attribute_value(
-                    MAG_BRAND_ATTRIBUTE_CODE, product
+    try:
+        magento = MagentoCatalog()
+        updates = magento.fetch_web_products(full)
+        output_json = []
+        for product in updates:
+            product_categories = []
+            for attribute in product["custom_attributes"]:
+                if attribute["attribute_code"] == "category_ids":
+                    for id in attribute["value"]:
+                        category_name = magento.fetch_web_category_name(id)
+                        product_categories.append(category_name)
+            tidio_product = {
+                "id": product["id"],
+                "url": f"{MAGENTO_DOMAIN}/{magento.determine_web_product_url(product)}",
+                "sku": product["sku"],
+                "title": product["name"],
+                "status": magento.determine_web_product_status(product),
+                "updated_at": magento.iso8601_format_updated_at(
+                    product["updated_at"]
                 ),
-            ),
-            "product_type": product_categories[-1],
-            "price": magento.determine_web_product_price(product),
-        }
-        output_json.append(tidio_product)
-        print(product["sku"])
-    with open(OUTPUT_FILE, "w") as output_file:
-        output_file.write(json.dumps(output_json))
+                "image_url": magento.determine_web_product_image_url(
+                    product["media_gallery_entries"]
+                ),
+                "features": magento.extract_features(product),
+                "description": magento.fetch_web_product_attribute_value(
+                    "description", product
+                ),
+                "default_currency": "GBP",
+                "vendor": magento.fetch_web_atrribute_value_label(
+                    MAG_BRAND_ATTRIBUTE_CODE,
+                    magento.fetch_web_product_attribute_value(
+                        MAG_BRAND_ATTRIBUTE_CODE, product
+                    ),
+                ),
+                "product_type": product_categories[-1],
+                "price": magento.determine_web_product_price(product),
+            }
+            output_json.append(tidio_product)
+            print(product["sku"])
+    except Exception as e:
+        logger.error("Something went wrong getting the products.", e)
+    finally:
+        logger.info("Writing output so far.")
+        with open(OUTPUT_FILE, "w") as output_file:
+            output_file.write(json.dumps(output_json))
 
 
 if __name__ == "__main__":
 
+    # Get and prepare products
     parse_and_write_magento_products()
 
+    # Read products
     with open(OUTPUT_FILE, "r") as input_file:
         products = json.loads(input_file.read())
 
+    # Batch products
     batched_products = itertools.batched(products, TIDIO_MAX_PRODUCTS_PER_REQ)
 
+    # Save batches to disk
+    with open("saved_batches.json", "w") as saved_batches_file:
+        saved_batches_file.write(json.dumps(batched_products))
+
+    # Send batches to Tidio
     tidio = TidioAPI()
     i = 1
     for batch in batched_products:
