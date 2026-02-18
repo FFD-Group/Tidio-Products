@@ -1,3 +1,4 @@
+import itertools
 import time
 from dotenv import load_dotenv
 import logging
@@ -35,6 +36,7 @@ TIDIO_CLIENT_SECRET_KEY = "X-Tidio-Openapi-Client-Secret"
 TIDIO_CLIENT_ID = os.getenv("TIDIO_CLIENT_ID")
 TIDIO_CLIENT_SECRET = os.getenv("TIDIO_CLIENT_SECRET")
 TIDIO_MAX_REQ_PER_MIN = os.getenv("TIDIO_MAX_REQ_PER_MIN")
+TIDIO_MAX_PRODUCTS_PER_REQ = 100
 TIDIO_RATELIMIT_LIMIT_KEY = "x-ratelimit-limit"
 TIDIO_RATELIMIT_REMAINING_KEY = "x-ratelimit-remaining"
 TIDIO_ACCEPT_API_VERSION = os.getenv("TIDIO_ACCEPT_API_VERSION")
@@ -406,5 +408,13 @@ if __name__ == "__main__":
     with open(OUTPUT_FILE, "r") as input_file:
         products = json.loads(input_file.read())
 
+    batched_products = itertools.batched(products, TIDIO_MAX_PRODUCTS_PER_REQ)
+
     tidio = TidioAPI()
-    tidio.upsert_product_batch(products)
+    i = 1
+    for batch in batched_products:
+        print("Batch", i, ":", len(batch))
+
+        tidio.upsert_product_batch(batch)
+
+        i += 1
