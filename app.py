@@ -397,7 +397,7 @@ def parse_and_write_magento_products(full: bool = False) -> None:
                 "price": magento.determine_web_product_price(product),
             }
             output_json.append(tidio_product)
-            print(product["sku"])
+            logger.info(f"Processing {product['sku']}")
     except Exception as e:
         logger.error("Something went wrong getting the products.", e)
     finally:
@@ -408,16 +408,20 @@ def parse_and_write_magento_products(full: bool = False) -> None:
 
 if __name__ == "__main__":
 
+    logger.info("Starting...")
     # Get and prepare products
     parse_and_write_magento_products()
 
+    logger.info("Reading products from file...")
     # Read products
     with open(OUTPUT_FILE, "r") as input_file:
         products = json.loads(input_file.read())
 
+    logger.info("Batching products in preparation for API...")
     # Batch products
     batched_products = itertools.batched(products, TIDIO_MAX_PRODUCTS_PER_REQ)
 
+    logger.info("Saving batches to disk...")
     # Save batches to disk
     with open("saved_batches.json", "w") as saved_batches_file:
         saved_batches_file.write(json.dumps(batched_products))
@@ -426,8 +430,6 @@ if __name__ == "__main__":
     tidio = TidioAPI()
     i = 1
     for batch in batched_products:
-        print("Batch", i, ":", len(batch))
-
+        logger.info(f"Sending batch {i}: {len(batch)} products")
         tidio.upsert_product_batch(batch)
-
         i += 1
