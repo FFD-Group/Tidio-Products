@@ -111,12 +111,12 @@ class MagentoCatalog:
                 "searchCriteria[filter_groups][2][filters][0][value]"
             ] = updated_after_str
 
-        raw_order_response = requests.get(
+        raw_response = requests.get(
             self.mag_products_ep,
             headers=self.mag_headers,
             params=product_criteria,
         )
-        json_response = raw_order_response.json()
+        json_response = raw_response.json()
         if "total_count" not in json_response:
             if "errors" in json_response and (len(json_response["errors"]) > 0):
                 logger.info("Errors" + json.dumps(json_response["errors"]))
@@ -131,12 +131,16 @@ class MagentoCatalog:
                 logger.info(
                     "Something happened where the response didn't contain 'total_count' but 'items' wasn't NULL."
                 )
-            logger.info("Exiting")
-            sys.exit(0)
+            logger.info(
+                f"Response status: {raw_response.status_code}, content: {raw_response.content}"
+            )
+            raise Exception("Something went wrong with fetching products.")
         elif json_response["total_count"] == 0:
             logger.info("No product updates found since " + updated_after_str)
-            logger.info("Exiting")
-            sys.exit(0)
+            logger.info(
+                f"Response status: {raw_response.status_code}, content: {raw_response.content}"
+            )
+            raise Exception("Something went wrong with fetching products.")
         else:
             logger.info(
                 "Found "
@@ -399,7 +403,7 @@ def parse_and_write_magento_products(full: bool = False) -> None:
             output_json.append(tidio_product)
             logger.info(f"Processing {product['sku']}")
     except Exception as e:
-        logger.error("Something went wrong getting the products.", e)
+        logger.error(f"Something went wrong getting the products. {e}")
     finally:
         logger.info("Writing output so far.")
         with open(OUTPUT_FILE, "w") as output_file:
