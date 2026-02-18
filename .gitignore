@@ -4,3 +4,4 @@
 *.reference.json
 *.log
 output.json
+saved_batches.json
