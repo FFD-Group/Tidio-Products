@@ -236,6 +236,13 @@ class MagentoCatalog:
             ][0]
             if int(poa) == 1:
                 return "null"
+            discontinued = [
+                attr["value"]
+                for attr in product["custom_attributes"]
+                if attr["attribute_code"] == "discontinued"
+            ][0]
+            if int(discontinued) == 1:
+                return "null"
         criteria = {
             "searchCriteria[filter_groups][0][filters][0][field]": "sku",
             "searchCriteria[filter_groups][0][filters][0][value]": product[
