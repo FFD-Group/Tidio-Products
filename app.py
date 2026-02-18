@@ -27,6 +27,8 @@ logger.setLevel(logging.DEBUG)
 logger.addHandler(stream_handler)
 logger.addHandler(file_handler)
 
+OUTPUT_FILE = os.getenv("OUTPUT_FILE")
+
 # Tidio
 TIDIO_CLIENT_KEY = "X-Tidio-Openapi-Client-Id"
 TIDIO_CLIENT_SECRET_KEY = "X-Tidio-Openapi-Client-Secret"
@@ -354,9 +356,9 @@ class TidioAPI:
         logger.debug(raw_response.content)
 
 
-if __name__ == "__main__":
+def parse_and_write_magento_products(full: bool = False) -> None:
     magento = MagentoCatalog()
-    updates = magento.fetch_web_products()
+    updates = magento.fetch_web_products(full)
     output_json = []
     for product in updates:
         product_categories = []
@@ -393,10 +395,15 @@ if __name__ == "__main__":
         }
         output_json.append(tidio_product)
         print(product["sku"])
-    with open("output.json", "w") as output_file:
+    with open(OUTPUT_FILE, "w") as output_file:
         output_file.write(json.dumps(output_json))
 
-    with open("output.json", "r") as input_file:
+
+if __name__ == "__main__":
+
+    parse_and_write_magento_products()
+
+    with open(OUTPUT_FILE, "r") as input_file:
         products = json.loads(input_file.read())
 
     tidio = TidioAPI()
