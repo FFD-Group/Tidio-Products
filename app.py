@@ -64,6 +64,8 @@ class MagentoCatalog:
             + "]"
             + ",errors,message,code,trace,parameters,total_count"
         )
+        # Make sure not to use filter_group[2] here as that is reserved for
+        #   the `updated_at` group that may be merged in.
         self.mag_product_criteria = {
             "searchCriteria[filter_groups][0][filters][0][field]": "status",
             "searchCriteria[filter_groups][0][filters][0][value]": 1,  # enabled
@@ -167,7 +169,7 @@ class MagentoCatalog:
             return None
         for media in product_media:
             if "image" in media["types"]:
-                return f"{MAGENTO_DOMAIN}/media/catalog/product/{media['file']}"
+                return f"{MAGENTO_DOMAIN}/media/catalog/product{media['file']}"
         return None
 
     def determine_web_product_url(self, product: dict) -> str:
@@ -352,43 +354,43 @@ if __name__ == "__main__":
     magento = MagentoCatalog()
     updates = magento.fetch_web_products()
     output_json = []
-    # for product in updates:
-    #     product_categories = []
-    #     for attribute in product["custom_attributes"]:
-    #         if attribute["attribute_code"] == "category_ids":
-    #             for id in attribute["value"]:
-    #                 category_name = magento.fetch_web_category_name(id)
-    #                 product_categories.append(category_name)
-    #     tidio_product = {
-    #         "id": product["id"],
-    #         "url": f"{MAGENTO_DOMAIN}/{magento.determine_web_product_url(product)}",
-    #         "sku": product["sku"],
-    #         "title": product["name"],
-    #         "status": magento.determine_web_product_status(product),
-    #         "updated_at": magento.iso8601_format_updated_at(
-    #             product["updated_at"]
-    #         ),
-    #         "image_url": magento.determine_web_product_image_url(
-    #             product["media_gallery_entries"]
-    #         ),
-    #         "features": magento.extract_features(product),
-    #         "description": magento.fetch_web_product_attribute_value(
-    #             "description", product
-    #         ),
-    #         "default_currency": "GBP",
-    #         "vendor": magento.fetch_web_atrribute_value_label(
-    #             MAG_BRAND_ATTRIBUTE_CODE,
-    #             magento.fetch_web_product_attribute_value(
-    #                 MAG_BRAND_ATTRIBUTE_CODE, product
-    #             ),
-    #         ),
-    #         "product_type": product_categories[-1],
-    #         "price": magento.determine_web_product_price(product),
-    #     }
-    #     output_json.append(tidio_product)
-    #     print(product["sku"])
-    # with open("output.json", "w") as output_file:
-    #     output_file.write(json.dumps(output_json))
+    for product in updates:
+        product_categories = []
+        for attribute in product["custom_attributes"]:
+            if attribute["attribute_code"] == "category_ids":
+                for id in attribute["value"]:
+                    category_name = magento.fetch_web_category_name(id)
+                    product_categories.append(category_name)
+        tidio_product = {
+            "id": product["id"],
+            "url": f"{MAGENTO_DOMAIN}/{magento.determine_web_product_url(product)}",
+            "sku": product["sku"],
+            "title": product["name"],
+            "status": magento.determine_web_product_status(product),
+            "updated_at": magento.iso8601_format_updated_at(
+                product["updated_at"]
+            ),
+            "image_url": magento.determine_web_product_image_url(
+                product["media_gallery_entries"]
+            ),
+            "features": magento.extract_features(product),
+            "description": magento.fetch_web_product_attribute_value(
+                "description", product
+            ),
+            "default_currency": "GBP",
+            "vendor": magento.fetch_web_atrribute_value_label(
+                MAG_BRAND_ATTRIBUTE_CODE,
+                magento.fetch_web_product_attribute_value(
+                    MAG_BRAND_ATTRIBUTE_CODE, product
+                ),
+            ),
+            "product_type": product_categories[-1],
+            "price": magento.determine_web_product_price(product),
+        }
+        output_json.append(tidio_product)
+        print(product["sku"])
+    with open("output.json", "w") as output_file:
+        output_file.write(json.dumps(output_json))
 
     with open("output.json", "r") as input_file:
         products = json.loads(input_file.read())
