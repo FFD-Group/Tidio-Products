@@ -147,9 +147,6 @@ class MagentoCatalog:
             raise ValueError(
                 "Provide a product dictionary to determine status."
             )
-        if "discontinued" in product["custom_attributes"]:
-            if product["custom_attributes"]["discontinued"] != 0:
-                return "hidden"
         return "visible"
 
     def iso8601_format_updated_at(self, updated_at: str) -> str:
