@@ -24,7 +24,7 @@ file_handler = logging.FileHandler("tidio_products.log")
 file_handler.setFormatter(formatter)
 
 logger = logging.getLogger()
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 logger.addHandler(stream_handler)
 logger.addHandler(file_handler)
 
@@ -359,10 +359,10 @@ class TidioAPI:
 
 
 def parse_and_write_magento_products(full: bool = False) -> None:
+    output_json = []
     try:
         magento = MagentoCatalog()
         updates = magento.fetch_web_products(full)
-        output_json = []
         for product in updates:
             product_categories = []
             for attribute in product["custom_attributes"]:
