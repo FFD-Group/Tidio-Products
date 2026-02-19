@@ -381,9 +381,13 @@ class TidioAPI:
                 f"Too many products in upsert to Tidio API. Maximum 100 per request, found {number_of_products}."
             )
         if self.last_request_time:
-            time_now = pendulum.now("Europe/London")
-            if time_now <= self.last_request_time.subtract(seconds=7):
-                time.sleep(7)
+            elapsed = (
+                pendulum.now("Europe/London")
+                .diff(self.last_request_time)
+                .in_seconds()
+            )
+            if elapsed < 7:
+                time.sleep(7 - elapsed)
         self.last_request_time = pendulum.now("Europe/London")
         payload = json.dumps({"products": products})
         raw_response = requests.put(
