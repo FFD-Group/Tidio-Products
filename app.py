@@ -326,6 +326,8 @@ class MagentoCatalog:
                 value = label if label else attr["value"]
                 key = attr["attribute_code"].replace("filt_", "")
                 logger.debug(f"Adding feature {key}: {label}.")
+                if 250 > len(value):
+                    value = value[:249]
                 features[key] = value
         return features
 
@@ -469,7 +471,7 @@ def parse_and_write_magento_products(full: bool = False) -> None:
                 product_categories[-1] if len(product_categories) > 0 else None
             )
             tidio_product = {
-                "id": product["sku"],
+                "id": product["id"],
                 "url": f"{MAGENTO_DOMAIN}/{url_key}",
                 "sku": product["sku"],
                 "title": product["name"],
