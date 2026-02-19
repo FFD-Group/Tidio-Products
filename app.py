@@ -1,13 +1,23 @@
+import argparse
+import io
 import itertools
 import math
+import mimetypes
+from pathlib import Path
 import time
+from typing import List
+import zipfile
 from dotenv import load_dotenv
 import logging
 import json
+from oauthlib.oauth2 import BackendApplicationClient
+from requests_oauthlib import OAuth2Session
 import os
 import pendulum
 import requests
 import sys
+
+import urllib
 
 load_dotenv()
 
@@ -30,6 +40,8 @@ logger.addHandler(stream_handler)
 logger.addHandler(file_handler)
 
 OUTPUT_FILE = os.getenv("OUTPUT_FILE")
+MANIFEST_FOLDER_ID = os.getenv("Z_WD_MANIFEST_FOLDER_ID")
+CHECKPOINT_EVERY_N_BATCHES = 5
 
 # Tidio
 TIDIO_CLIENT_KEY = "X-Tidio-Openapi-Client-Id"
@@ -53,6 +65,7 @@ UPDATE_AGE_MINS = os.getenv("UPDATE_AGE_MINS")
 EXCLUDED_FEATURES = json.loads(os.getenv("EXCLUDED_FEATURES"))
 MAG_BRAND_ATTRIBUTE_CODE = os.getenv("MAG_BRAND_ATTRIBUTE_CODE")
 MAGENTO_WEBSITE_ID = os.getenv("MAG_WEBSITE_ID")
+BATCHES_FILE = "saved_batches.json"
 
 
 class MagentoCatalog:
@@ -481,31 +494,328 @@ def parse_and_write_magento_products(full: bool = False) -> None:
             output_file.write(json.dumps(output_json))
 
 
-if __name__ == "__main__":
+class WorkDrive:
+    """WorkDrive class utilises the Zoho WorkDrive REST API."""
 
-    logger.info("Starting...")
-    # Get and prepare products
-    parse_and_write_magento_products(full=True)
+    oauthlib_conn: OAuth2Session
+    last_file_meta: dict
 
-    logger.info("Reading products from file...")
-    # Read products
-    with open(OUTPUT_FILE, "r") as input_file:
-        products = json.loads(input_file.read())
+    def __init__(self) -> None:
+        """Initialise the WorkDrive instance, primarily to setup the
+        OAuth2.0 credentials and make sure they are authorised."""
 
+        load_dotenv()
+        client_id = os.getenv("Z_CLIENT_ID")
+        client_secret = os.getenv("Z_CLIENT_SECRET")
+        scope = os.getenv("Z_SCOPE")
+        refresh_token = os.getenv("Z_REFRESH_TOKEN")
+
+        client = BackendApplicationClient(
+            client_id=client_id, refresh_token=refresh_token
+        )
+        self.oauthlib_conn = OAuth2Session(client=client)
+        if not self.oauthlib_conn.authorized:
+            self.oauthlib_conn.fetch_token(
+                token_url=f"https://accounts.zoho.{os.getenv('Z_REGION')}/oauth/v2/token",
+                client_id=client_id,
+                client_secret=client_secret,
+                scope=scope,
+            )
+
+    def find_folder(self, parent_folder_id: str, folder_name: str) -> str:
+        """Find a WorkDrive folder ID in the given parent folder with
+        the folder name as given. Return the folder ID."""
+        parameters = {"filter[type]": "folder"}
+        list_folder_contents_endpoint = f"https://www.zohoapis.{os.getenv('Z_REGION')}/workdrive/api/v1/files/{parent_folder_id}/files?"
+        first = True
+        for key in parameters.keys():
+            if not first:
+                list_folder_contents_endpoint = (
+                    list_folder_contents_endpoint + "&"
+                )
+            first = False
+            list_folder_contents_endpoint = (
+                list_folder_contents_endpoint
+                + f"{urllib.parse.quote_plus(key)}={parameters[key]}"
+            )
+        list_folder_resp = self.oauthlib_conn.get(list_folder_contents_endpoint)
+        list_folder_resp.raise_for_status()
+        for folder in list_folder_resp.json()["data"]:
+            if folder["attributes"]["name"] == folder_name:
+                return folder["id"]
+        return None
+
+    def find_or_create_folder(self, parent_id: str, folder_name: str) -> str:
+        found_folder_id = self.find_folder(parent_id, folder_name)
+        if found_folder_id:
+            return found_folder_id
+        return self.create_folder(parent_id, folder_name)
+
+    def create_folder(self, parent_id: str, folder_name: str) -> str:
+        """Create a WorkDrive folder in the given parent folder with
+        the folder name as given. Return the folder ID."""
+        post_data = {
+            "data": {
+                "attributes": {"name": folder_name, "parent_id": parent_id},
+                "type": "files",
+            }
+        }
+        create_folder_endpoint = f"https://www.zohoapis.{os.getenv('Z_REGION')}/workdrive/api/v1/files"
+        response = self.oauthlib_conn.post(
+            create_folder_endpoint, json=post_data
+        )
+        response.raise_for_status()
+        return response.json()["data"]["id"]
+
+    def get_last_file_id(self) -> str:
+        return self.last_file_meta["attributes"]["resource_id"]
+
+    def download_file(self, file_id: str) -> str:
+        download_endpoint = f"https://download.zoho.{os.getenv('Z_REGION')}/v1/workdrive/download/{file_id}"
+        file_resp = self.oauthlib_conn.get(download_endpoint)
+        file_resp.raise_for_status()
+        fileinfo_endpoint = f"https://www.zohoapis.{os.getenv('Z_REGION')}/workdrive/api/v1/files/{file_id}"
+        fileinfo_resp = self.oauthlib_conn.get(fileinfo_endpoint)
+        fileinfo_resp.raise_for_status()
+        file_extn = fileinfo_resp.json()["data"]["attributes"]["extn"]
+        temp_path = f"temp/{file_id}"
+        if file_extn == "zip":
+            Path(temp_path).mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(
+                io.BytesIO(file_resp.content)
+            ) as zip_reference:
+                zip_reference.extractall(temp_path)
+            temp_path = temp_path + "/"
+        else:
+            with open(
+                f"{temp_path}.{file_extn}", "w", encoding="utf-8"
+            ) as temp_file:
+                temp_file.write(file_resp.content.decode())
+            temp_path = f"{temp_path}.{file_extn}"
+        return temp_path
+
+    def upload_file(
+        self, location_id: str, file_path: str, delete_local: bool = True
+    ) -> str:
+        """Uploads the file at the given filepath to the folder location indicated
+        by the location_id parameter. Uses mimetypes to auto-detect type. If a file
+        already exists with the same name, WorkDrive automatically appends a
+        timestamp to the end."""
+
+        file_type = mimetypes.guess_type(file_path)
+        file_name = Path(file_path).name
+        url = f"https://www.zohoapis.{os.getenv('Z_REGION')}/workdrive/api/v1/upload"
+        payload = {"parent_id": location_id, "override-name-exist": "false"}
+        try:
+            with open(file_path, "rb") as file:
+                files = [("content", (file_name, file.read(), file_type))]
+        except OSError as e:
+            print(e)
+        response = self.oauthlib_conn.post(url, data=payload, files=files)
+
+        if response.status_code != 200:
+            print(response.status_code, response.content)
+            return
+
+        if delete_local:
+            os.remove(file_path)
+
+        self.last_file_meta = response.json()["data"][0]
+
+        return response.json()["data"][0]["attributes"]["Permalink"]
+
+    def get_locations(self) -> List:
+        """Fetches a list of tuples which represent subfolder names & IDs
+        from the defined root folder and all subfolders one level deep
+        from those."""
+
+        locations = [
+            (
+                os.getenv("Z_WD_ROOT_FOLDER_NAME"),
+                os.getenv("Z_WD_ROOT_FOLDER_ID"),
+            )
+        ]
+        folders = self._list_folders(locations[0][1])
+        for folder in folders:
+            id = folder["id"]
+            name = folder["attributes"]["name"]
+            locations.append((name, id))
+            subfolders = self._list_folders(id)
+            for subfolder in subfolders:
+                subf_name = f"{name} > {subfolder['attributes']['name']}"
+                locations.append((subf_name, subfolder["id"]))
+        return locations
+
+    def _list_folders(self, id) -> List:
+        """Fetches a list of folders within the folder with the given
+        id parameter. Returns a list of tuples with the folder name &
+        IDs."""
+
+        fields = "id,type,name"
+        r = self.oauthlib_conn.get(
+            f"https://www.zohoapis.{os.getenv('Z_REGION')}/workdrive/api/v1/files/{id}/files?filter%5Btype%5D=folder&fields%5Bfiles%5D="
+            + fields
+        )
+        if r.status_code != 200:
+            return []
+        return json.loads(r.content)["data"]
+
+
+def create_batches(products):
     logger.info("Batching products in preparation for API...")
     # Batch products
     batched_products = [
-        list(batch)
-        for batch in itertools.batched(products, TIDIO_MAX_PRODUCTS_PER_REQ)
+        list(b) for b in itertools.batched(products, TIDIO_MAX_PRODUCTS_PER_REQ)
     ]
 
     logger.info("Saving batches to disk...")
     # Save batches to disk
-    with open("saved_batches.json", "w") as f:
-        json.dump(batched_products, f)
+    manifest = {
+        "meta": {
+            "total_products": len(products),
+            "total_batches": len(batched_products),
+            "created_at": pendulum.now("Europe/London").to_iso8601_string(),
+        },
+        "batches": [
+            {
+                "index": i,
+                "size": len(b),
+                "status": "pending",
+                "sent_at": None,
+                "products": b,
+            }
+            for i, b in enumerate(batched_products)
+        ],
+    }
 
-    # Send batches to Tidio
+    with open(BATCHES_FILE, "w") as f:
+        json.dump(manifest, f)
+
+
+def send_batches(manifest: dict, wd: WorkDrive) -> bool:
+    """Send all pending batches. Returns True if all sent successfully."""
     tidio = TidioAPI()
-    for i, batch in enumerate(batched_products, 1):
-        logger.info(f"Sending batch {i}: {len(batch)} products")
-        # tidio.upsert_product_batch(batch)
+    total = manifest["meta"]["total_batches"]
+    all_ok = True
+
+    for batch_entry in manifest["batches"]:
+        if batch_entry["status"] == "sent":
+            logger.info(
+                f"Skipping batch {batch_entry['index']}/{total} (already sent)"
+            )
+            continue
+
+        try:
+            tidio.upsert_product_batch(batch_entry["products"])
+            batch_entry["status"] = "sent"
+            batch_entry["sent_at"] = pendulum.now(
+                "Europe/London"
+            ).to_iso8601_string()
+            logger.info(
+                f"Sent batch {batch_entry['index'] + 1}/{total} ({batch_entry['size']} products)"
+            )
+        except Exception as e:
+            batch_entry["status"] = "failed"
+            all_ok = False
+            logger.error(f"Batch {batch_entry['index']} failed: {e}")
+        finally:
+            # Always flush to disk
+            with open(BATCHES_FILE, "w") as f:
+                json.dump(manifest, f)
+
+        # Periodic WorkDrive checkpoint during long runs
+        sent_count = sum(
+            1 for b in manifest["batches"] if b["status"] == "sent"
+        )
+        if sent_count % CHECKPOINT_EVERY_N_BATCHES == 0:
+            upload_manifest(wd, manifest)
+
+    return all_ok
+
+
+def upload_manifest(wd: WorkDrive, manifest: dict) -> str:
+    """Write manifest to disk and upload to WorkDrive. Returns permalink."""
+    with open(BATCHES_FILE, "w") as f:
+        json.dump(manifest, f)
+    permalink = wd.upload_file(
+        MANIFEST_FOLDER_ID, BATCHES_FILE, delete_local=False
+    )
+    file_id = wd.get_last_file_id()
+    logger.info(
+        f"Manifest uploaded to WorkDrive. File ID: {file_id} | URL: {permalink}"
+    )
+    return file_id
+
+
+def download_manifest(wd: WorkDrive, file_id: str) -> dict:
+    """Download a manifest from WorkDrive and return it as a dict."""
+    local_path = wd.download_file(file_id)
+    with open(local_path, "r") as f:
+        return json.load(f)
+
+
+if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--full", action="store_true", default=False)
+    parser.add_argument(
+        "--resume", type=str, default=None, metavar="WORKDRIVE_FILE_ID"
+    )
+    args = parser.parse_args()
+
+    wd = WorkDrive()
+
+    if args.resume:
+        logger.info(f"Resuming from WorkDrive manifest: {args.resume}")
+        manifest = download_manifest(wd, args.resume)
+        pending = sum(1 for b in manifest["batches"] if b["status"] != "sent")
+        logger.info(
+            f"Resuming: {pending} of {manifest['meta']['total_batches']} batches remaining"
+        )
+    else:
+        logger.info(
+            f"Starting {'full' if args.full else 'incremental'} sync..."
+        )
+        parse_and_write_magento_products(full=args.full)
+
+        with open(OUTPUT_FILE, "r") as f:
+            products = json.load(f)
+
+        batched = [
+            list(b)
+            for b in itertools.batched(products, TIDIO_MAX_PRODUCTS_PER_REQ)
+        ]
+        manifest = {
+            "meta": {
+                "total_products": len(products),
+                "total_batches": len(batched),
+                "created_at": pendulum.now("Europe/London").to_iso8601_string(),
+                "sync_type": "full" if args.full else "incremental",
+            },
+            "batches": [
+                {
+                    "index": i,
+                    "size": len(b),
+                    "status": "pending",
+                    "sent_at": None,
+                    "products": b,
+                }
+                for i, b in enumerate(batched)
+            ],
+        }
+
+    all_ok = send_batches(manifest, wd)
+
+    if all_ok:
+        logger.info("Sync completed successfully.")
+        upload_manifest(wd, manifest)  # final record
+    else:
+        failed = [
+            b["index"] for b in manifest["batches"] if b["status"] == "failed"
+        ]
+        file_id = upload_manifest(wd, manifest)
+        logger.error(
+            f"Sync completed with failures on batches {failed}. "
+            f"To resume, run: python app.py --resume {file_id}"
+        )
+        sys.exit(1)  # non-zero so can detect failure
