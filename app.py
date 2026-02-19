@@ -587,7 +587,7 @@ class WorkDrive:
         fileinfo_resp = self.oauthlib_conn.get(fileinfo_endpoint)
         fileinfo_resp.raise_for_status()
         file_extn = fileinfo_resp.json()["data"]["attributes"]["extn"]
-        temp_path = f"temp/{file_id}"
+        temp_path = f"{file_id}"
         if file_extn == "zip":
             Path(temp_path).mkdir(parents=True, exist_ok=True)
             with zipfile.ZipFile(
@@ -715,7 +715,7 @@ def send_batches(manifest: dict, wd: WorkDrive) -> bool:
             continue
 
         try:
-            # tidio.upsert_product_batch(batch_entry["products"])
+            tidio.upsert_product_batch(batch_entry["products"])
             batch_entry["status"] = "sent"
             batch_entry["sent_at"] = pendulum.now(
                 "Europe/London"
