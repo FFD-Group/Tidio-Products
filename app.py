@@ -1,4 +1,5 @@
 import itertools
+import math
 import time
 from dotenv import load_dotenv
 import logging
@@ -24,7 +25,7 @@ file_handler = logging.FileHandler("tidio_products.log")
 file_handler.setFormatter(formatter)
 
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 logger.addHandler(stream_handler)
 logger.addHandler(file_handler)
 
@@ -51,6 +52,7 @@ TIMEZONE = pendulum.timezone("Europe/London")
 UPDATE_AGE_MINS = os.getenv("UPDATE_AGE_MINS")
 EXCLUDED_FEATURES = json.loads(os.getenv("EXCLUDED_FEATURES"))
 MAG_BRAND_ATTRIBUTE_CODE = os.getenv("MAG_BRAND_ATTRIBUTE_CODE")
+MAGENTO_WEBSITE_ID = os.getenv("MAG_WEBSITE_ID")
 
 
 class MagentoCatalog:
@@ -64,13 +66,15 @@ class MagentoCatalog:
         self.mag_product_fields = (
             "items["
             + "id,sku,name,status,updated_at,media_gallery_entries,"
-            + "extension_attributes[configurable_product_links],custom_attributes"
+            + "extension_attributes[configurable_product_links,website_ids],custom_attributes"
             + "]"
             + ",errors,message,code,trace,parameters,total_count"
         )
         # Make sure not to use filter_group[2] here as that is reserved for
         #   the `updated_at` group that may be merged in.
         self.mag_product_criteria = {
+            "searchCriteria[currentPage]": 1,
+            "searchCriteria[pageSize]": 200,
             "searchCriteria[filter_groups][0][filters][0][field]": "status",
             "searchCriteria[filter_groups][0][filters][0][value]": 1,  # enabled
             "searchCriteria[filter_groups][0][filters][0][condition_type]": "eq",
@@ -97,11 +101,16 @@ class MagentoCatalog:
             "MAG_ATTRIBUTE_API_ENDPOINT"
         )
         self.mag_store_id = os.getenv("MAG_STORE_ID")
-        self.category_id_name_map = {}
+        self.category_id_name_map = {}  # {category_id: category name}
         self.attribute_value_label_map = {}
+        self.attribute_options_map = (
+            {}
+        )  # {attribute_code: {option_value: label}}
+        self.session = requests.Session()
+        self.session.headers.update(self.mag_headers)
 
     def fetch_web_products(self, full: bool = False) -> list:
-        product_criteria = self.mag_product_criteria
+        product_criteria = dict(self.mag_product_criteria)
         if not full:
             product_criteria |= self.mag_products_updated_criteria
             time_now = pendulum.now(tz=TIMEZONE)
@@ -111,44 +120,73 @@ class MagentoCatalog:
                 "searchCriteria[filter_groups][2][filters][0][value]"
             ] = updated_after_str
 
-        raw_response = requests.get(
-            self.mag_products_ep,
-            headers=self.mag_headers,
-            params=product_criteria,
-        )
-        json_response = raw_response.json()
-        if "total_count" not in json_response:
-            if "errors" in json_response and (len(json_response["errors"]) > 0):
-                logger.info("Errors" + json.dumps(json_response["errors"]))
+        page_size = int(product_criteria.get("searchCriteria[pageSize]", 200))
 
-            elif "message" in json_response:
-                logger.info("Message" + json.dumps(json_response["message"]))
-            elif "items" in json_response and json_response["items"]:
+        all_products = []
+
+        def _fetch_web_products(current_page: int = 1) -> list:
+            logger.info(f"Fetching page number {current_page}.")
+            params = dict(product_criteria)
+            params["searchCriteria[currentPage]"] = current_page
+
+            raw_response = self.session.get(
+                self.mag_products_ep,
+                params=params,
+            )
+            json_response = raw_response.json()
+            if "total_count" not in json_response:
+                if "errors" in json_response and (
+                    len(json_response["errors"]) > 0
+                ):
+                    logger.info("Errors" + json.dumps(json_response["errors"]))
+
+                elif "message" in json_response:
+                    logger.info(
+                        "Message" + json.dumps(json_response["message"])
+                    )
+                elif "items" in json_response and json_response["items"]:
+                    logger.info(
+                        "No product updates found since " + updated_after_str
+                    )
+                else:
+                    logger.info(
+                        "Something happened where the response didn't contain 'total_count' but 'items' wasn't NULL."
+                    )
                 logger.info(
-                    "No product updates found since " + updated_after_str
+                    f"Response status: {raw_response.status_code}, content: {raw_response.content}"
+                )
+                raise Exception("Something went wrong with fetching products.")
+
+            return json_response
+
+        first_products_page = _fetch_web_products(1)
+        total_count = int(first_products_page["total_count"])
+
+        if total_count == 0:
+            if not full:
+                logger.info(
+                    "No product updates found since" + updated_after_str
                 )
             else:
-                logger.info(
-                    "Something happened where the response didn't contain 'total_count' but 'items' wasn't NULL."
-                )
+                logger.info("No product updates found.")
+            return []
+
+        total_pages = math.ceil(total_count / page_size)
+
+        if not full:
             logger.info(
-                f"Response status: {raw_response.status_code}, content: {raw_response.content}"
+                f"Found {total_count} product updates since {updated_after_str}."
             )
-            raise Exception("Something went wrong with fetching products.")
-        elif json_response["total_count"] == 0:
-            logger.info("No product updates found since " + updated_after_str)
-            logger.info(
-                f"Response status: {raw_response.status_code}, content: {raw_response.content}"
-            )
-            raise Exception("Something went wrong with fetching products.")
         else:
-            logger.info(
-                "Found "
-                + str(json_response["total_count"])
-                + " product updates since "
-                + updated_after_str
-            )
-        return list(json_response["items"])
+            logger.info(f"Found {total_count} products.")
+
+        all_products.extend(first_products_page.get("items", []))
+
+        for page in range(2, total_pages + 1):
+            response = _fetch_web_products(page)
+            all_products.extend(response.get("items", []))
+
+        return all_products
 
     def determine_web_product_status(self, product: dict) -> str:
         if not isinstance(product, dict) or not product:
@@ -172,6 +210,7 @@ class MagentoCatalog:
             raise ValueError("Provide the product's 'media_gallery_entries'.")
         if len(product_media) == 0:
             return None
+        logger.debug("Determining main image for product.")
         for media in product_media:
             if "image" in media["types"]:
                 return f"{MAGENTO_DOMAIN}/media/catalog/product{media['file']}"
@@ -197,11 +236,12 @@ class MagentoCatalog:
             raise ValueError(
                 "Product dictionary does not include custom attributes."
             )
+        logger.debug(f"Fetching value for {attribute}.")
         for product_attribute in product["custom_attributes"]:
             if product_attribute["attribute_code"] == attribute:
                 return product_attribute["value"]
         raise ValueError(
-            "Product custom attributes do not include a '{attribute}'."
+            f"Product custom attributes do not include a '{attribute}'."
         )
 
     def fetch_web_category_name(self, category_id: int | str) -> str:
@@ -212,16 +252,15 @@ class MagentoCatalog:
             raise ValueError(
                 "Please provide a category ID (int or str) to get the name of."
             )
-
+        logger.debug(f"Fetching name of category ID {category_id}.")
         # memoization
         if category_id in self.category_id_name_map:
             return self.category_id_name_map[category_id]
 
         # fetch category from Magento
         category_endpoint = f"{self.mag_categories_ep}/{category_id}"
-        raw_order_response = requests.get(
+        raw_order_response = self.session.get(
             category_endpoint,
-            headers=self.mag_headers,
         )
         json_response = raw_order_response.json()
         category_name = json_response["name"]
@@ -236,21 +275,24 @@ class MagentoCatalog:
             raise ValueError(
                 "Please provide a product dictionary to determine price."
             )
+        logger.debug("Determining price of web product.")
         if "custom_attributes" in product:
             poa = [
                 attr["value"]
                 for attr in product["custom_attributes"]
                 if attr["attribute_code"] == "priceonapplication"
-            ][0]
-            if int(poa) == 1:
-                return "null"
+            ]
+            if len(poa) > 0:
+                if int(poa[0]) == 1:
+                    return "null"
             discontinued = [
                 attr["value"]
                 for attr in product["custom_attributes"]
                 if attr["attribute_code"] == "discontinued"
-            ][0]
-            if int(discontinued) == 1:
-                return "null"
+            ]
+            if len(discontinued) > 0:
+                if int(discontinued[0]) == 1:
+                    return "null"
         criteria = {
             "searchCriteria[filter_groups][0][filters][0][field]": "sku",
             "searchCriteria[filter_groups][0][filters][0][value]": product[
@@ -261,9 +303,7 @@ class MagentoCatalog:
             "fields": "items[price_info]",
         }
         prices_endpoint = f"{self.mag_prices_ep}"
-        raw_prices_response = requests.get(
-            prices_endpoint, headers=self.mag_headers, params=criteria
-        )
+        raw_prices_response = self.session.get(prices_endpoint, params=criteria)
         json_response = raw_prices_response.json()
         if not json_response["items"]:
             return "null"
@@ -275,9 +315,9 @@ class MagentoCatalog:
         self, attribute_code: str, option_id: int | str
     ) -> str | None:
         # memoization
-        key = attribute_code + str(option_id)
-        if key in self.attribute_value_label_map:
-            return self.attribute_value_label_map[key]
+        str_option_id = str(option_id)
+        if attribute_code in self.attribute_options_map:
+            return self.attribute_options_map[attribute_code].get(str_option_id)
         if not isinstance(attribute_code, str) or not attribute_code:
             raise ValueError("Please provide an attribute code.")
         if not option_id or (
@@ -286,21 +326,16 @@ class MagentoCatalog:
             raise ValueError(
                 "Please provide an option id (int or str) to return the label of."
             )
+        logger.debug(f"Fetching attribute value labels of {attribute_code}.")
         attribute_endpoint = f"{self.mag_attribute_ep}{attribute_code}/options"
-        raw_attribute_response = requests.get(
-            attribute_endpoint, headers=self.mag_headers
-        )
-        json_response = raw_attribute_response.json()
-        label = [
-            opt["label"]
-            for opt in json_response
-            if opt["value"] == str(option_id)
-        ]
-        if len(label) == 0:
-            self.attribute_value_label_map[key] = None  # memoize
-            return None
-        self.attribute_value_label_map[key] = label[0]  # memoize
-        return label[0]
+        raw_attribute_response = self.session.get(attribute_endpoint)
+        options = raw_attribute_response.json()
+
+        self.attribute_options_map[attribute_code] = {
+            opt["value"]: opt["label"] for opt in options
+        }
+
+        return self.attribute_options_map[attribute_code].get(str_option_id)
 
     def extract_features(self, product: dict) -> dict:
         if not isinstance(product, dict) or not dict:
@@ -318,8 +353,29 @@ class MagentoCatalog:
                 )
                 value = label if label else attr["value"]
                 key = attr["attribute_code"].replace("filt_", "")
+                logger.debug(f"Adding feature {key}: {label}.")
                 features[key] = value
         return features
+
+    def build_attribute_index(self, product: dict) -> dict:
+        return {
+            attr["attribute_code"]: attr["value"]
+            for attr in product.get("custom_attributes", [])
+        }
+
+    def prefetch_all_categories(self) -> None:
+        """Loads the full category tree into the memoization map in one request."""
+        response = self.session.get(self.mag_categories_ep)
+
+        def walk(node):
+            self.category_id_name_map[node["id"]] = node["name"]
+            self.category_id_name_map[str(node["id"])] = node[
+                "name"
+            ]  # handle str keys too
+            for child in node.get("children_data", []):
+                walk(child)
+
+        walk(response.json())
 
 
 class TidioAPI:
@@ -367,16 +423,31 @@ def parse_and_write_magento_products(full: bool = False) -> None:
     try:
         magento = MagentoCatalog()
         updates = magento.fetch_web_products(full)
+        magento.prefetch_all_categories()
         for product in updates:
+            if (
+                int(MAGENTO_WEBSITE_ID)
+                not in product["extension_attributes"]["website_ids"]
+            ):
+                logger.info(f"Skipping non-website product: {product['sku']}.")
+                continue
+            logger.info(f"Processing {product['sku']}")
+            attrs = magento.build_attribute_index(product)
+            poa = attrs.get("priceonapplication", "0")
+            discontinued = attrs.get("discontinued", "0")
+            category_ids = attrs.get("category_ids", [])
+            url_key = attrs.get("url_key", "")
+            description = attrs.get("description", "")
             product_categories = []
-            for attribute in product["custom_attributes"]:
-                if attribute["attribute_code"] == "category_ids":
-                    for id in attribute["value"]:
-                        category_name = magento.fetch_web_category_name(id)
-                        product_categories.append(category_name)
+            for id in category_ids:
+                category_name = magento.fetch_web_category_name(id)
+                product_categories.append(category_name)
+            lowest_category_name = (
+                product_categories[-1] if len(product_categories) > 0 else None
+            )
             tidio_product = {
                 "id": product["id"],
-                "url": f"{MAGENTO_DOMAIN}/{magento.determine_web_product_url(product)}",
+                "url": f"{MAGENTO_DOMAIN}/{url_key}",
                 "sku": product["sku"],
                 "title": product["name"],
                 "status": magento.determine_web_product_status(product),
@@ -387,21 +458,25 @@ def parse_and_write_magento_products(full: bool = False) -> None:
                     product["media_gallery_entries"]
                 ),
                 "features": magento.extract_features(product),
-                "description": magento.fetch_web_product_attribute_value(
-                    "description", product
-                ),
+                "description": description,
                 "default_currency": "GBP",
-                "vendor": magento.fetch_web_atrribute_value_label(
+                "price": magento.determine_web_product_price(product),
+            }
+            product_vendor = None
+            try:
+                product_vendor = magento.fetch_web_atrribute_value_label(
                     MAG_BRAND_ATTRIBUTE_CODE,
                     magento.fetch_web_product_attribute_value(
                         MAG_BRAND_ATTRIBUTE_CODE, product
                     ),
-                ),
-                "product_type": product_categories[-1],
-                "price": magento.determine_web_product_price(product),
-            }
+                )
+            except Exception as e:
+                logger.info("No brand value found for product.")
+            if product_vendor:
+                tidio_product["vendor"] = product_vendor
+            if lowest_category_name:
+                tidio_product["product_type"] = lowest_category_name
             output_json.append(tidio_product)
-            logger.info(f"Processing {product['sku']}")
     except Exception as e:
         logger.error(f"Something went wrong getting the products. {e}")
     finally:
@@ -414,7 +489,7 @@ if __name__ == "__main__":
 
     logger.info("Starting...")
     # Get and prepare products
-    parse_and_write_magento_products()
+    parse_and_write_magento_products(full=True)
 
     logger.info("Reading products from file...")
     # Read products
@@ -428,12 +503,16 @@ if __name__ == "__main__":
     logger.info("Saving batches to disk...")
     # Save batches to disk
     with open("saved_batches.json", "w") as saved_batches_file:
-        saved_batches_file.write(json.dumps(batched_products))
+        saved_batches_file.write(json.dumps(list(batched_products)))
+
+    # logger.info("Loading batches from file...")
+    # with open("saved_batches.json", "r") as saved_batches_file:
+    #     batched_products = json.loads(saved_batches_file.read())
 
     # Send batches to Tidio
     tidio = TidioAPI()
     i = 1
     for batch in batched_products:
         logger.info(f"Sending batch {i}: {len(batch)} products")
-        tidio.upsert_product_batch(batch)
+        # tidio.upsert_product_batch(batch)
         i += 1
