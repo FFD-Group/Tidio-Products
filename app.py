@@ -464,7 +464,7 @@ def parse_and_write_magento_products(full: bool = False) -> None:
                 product_categories[-1] if len(product_categories) > 0 else None
             )
             tidio_product = {
-                "id": product["id"],
+                "id": product["sku"],
                 "url": f"{MAGENTO_DOMAIN}/{url_key}",
                 "sku": product["sku"],
                 "title": product["name"],
