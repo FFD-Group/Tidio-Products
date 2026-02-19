@@ -276,23 +276,6 @@ class MagentoCatalog:
                 "Please provide a product dictionary to determine price."
             )
         logger.debug("Determining price of web product.")
-        if "custom_attributes" in product:
-            poa = [
-                attr["value"]
-                for attr in product["custom_attributes"]
-                if attr["attribute_code"] == "priceonapplication"
-            ]
-            if len(poa) > 0:
-                if int(poa[0]) == 1:
-                    return "null"
-            discontinued = [
-                attr["value"]
-                for attr in product["custom_attributes"]
-                if attr["attribute_code"] == "discontinued"
-            ]
-            if len(discontinued) > 0:
-                if int(discontinued[0]) == 1:
-                    return "null"
         criteria = {
             "searchCriteria[filter_groups][0][filters][0][field]": "sku",
             "searchCriteria[filter_groups][0][filters][0][value]": product[
@@ -460,7 +443,11 @@ def parse_and_write_magento_products(full: bool = False) -> None:
                 "features": magento.extract_features(product),
                 "description": description,
                 "default_currency": "GBP",
-                "price": magento.determine_web_product_price(product),
+                "price": (
+                    "null"
+                    if poa == 1
+                    else magento.determine_web_product_price(product)
+                ),
             }
             product_vendor = None
             try:
@@ -498,21 +485,18 @@ if __name__ == "__main__":
 
     logger.info("Batching products in preparation for API...")
     # Batch products
-    batched_products = itertools.batched(products, TIDIO_MAX_PRODUCTS_PER_REQ)
+    batched_products = [
+        list(batch)
+        for batch in itertools.batched(products, TIDIO_MAX_PRODUCTS_PER_REQ)
+    ]
 
     logger.info("Saving batches to disk...")
     # Save batches to disk
-    with open("saved_batches.json", "w") as saved_batches_file:
-        saved_batches_file.write(json.dumps(list(batched_products)))
-
-    # logger.info("Loading batches from file...")
-    # with open("saved_batches.json", "r") as saved_batches_file:
-    #     batched_products = json.loads(saved_batches_file.read())
+    with open("saved_batches.json", "w") as f:
+        json.dump(batched_products, f)
 
     # Send batches to Tidio
     tidio = TidioAPI()
-    i = 1
-    for batch in batched_products:
+    for i, batch in enumerate(batched_products, 1):
         logger.info(f"Sending batch {i}: {len(batch)} products")
         # tidio.upsert_product_batch(batch)
-        i += 1
