@@ -349,8 +349,12 @@ class MagentoCatalog:
 
         walk(response.json())
 
-    def fetch_all_prices(self, skus: list[str]) -> dict[str, float | str]:
-        """Returns {sku: price} for all SKUs in as few requests as possible."""
+    def fetch_all_prices(
+        self, skus: list[str], id_to_sku: dict[int, str]
+    ) -> dict[str, float | str]:
+        """Returns {sku: price} for all SKUs in as few requests as possible.
+        id_to_sku is a {product_id: sku} map used to key the response, since
+        the prices endpoint does not return sku in its fields-filtered response."""
         sku_prices = {}
         # Magento URLs can get long; chunk SKUs to be safe
         chunk_size = 50
@@ -364,11 +368,16 @@ class MagentoCatalog:
                 "searchCriteria[filter_groups][0][filters][0][condition_type]": "in",
                 "store_id": self.mag_store_id,
                 "currencyCode": "GBP",
-                "fields": "items[sku,price_info]",
+                "fields": "items[id,price_info]",
             }
             response = self.session.get(self.mag_prices_ep, params=criteria)
             for item in response.json().get("items", []):
-                sku = item["sku"]
+                sku = id_to_sku.get(item["id"])
+                if not sku:
+                    logger.warning(
+                        f"Price response contained unknown product id {item['id']}, skipping."
+                    )
+                    continue
                 sku_prices[sku] = item["price_info"]["extension_attributes"][
                     "tax_adjustments"
                 ]["final_price"]
@@ -429,12 +438,13 @@ def parse_and_write_magento_products(full: bool = False) -> None:
         attrs_by_sku = {
             p["sku"]: magento.build_attribute_index(p) for p in updates
         }
+        id_to_sku = {p["id"]: p["sku"] for p in updates}
         skus = [
             p["sku"]
             for p in updates
             if int(attrs_by_sku[p["sku"]].get("priceonapplication", 0)) != 1
         ]
-        price_map = magento.fetch_all_prices(skus)
+        price_map = magento.fetch_all_prices(skus, id_to_sku)
         for product in updates:
             if (
                 int(MAGENTO_WEBSITE_ID)
