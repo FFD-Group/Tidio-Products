@@ -1,5 +1,6 @@
 .env
 .venv/
+.vscode/
 
 *.reference.json
 *.log
