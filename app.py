@@ -270,30 +270,6 @@ class MagentoCatalog:
 
         return category_name
 
-    def determine_web_product_price(self, product: dict) -> float | str:
-        if not isinstance(product, dict) or not product:
-            raise ValueError(
-                "Please provide a product dictionary to determine price."
-            )
-        logger.debug("Determining price of web product.")
-        criteria = {
-            "searchCriteria[filter_groups][0][filters][0][field]": "sku",
-            "searchCriteria[filter_groups][0][filters][0][value]": product[
-                "sku"
-            ],
-            "store_id": self.mag_store_id,
-            "currencyCode": "GBP",
-            "fields": "items[price_info]",
-        }
-        prices_endpoint = f"{self.mag_prices_ep}"
-        raw_prices_response = self.session.get(prices_endpoint, params=criteria)
-        json_response = raw_prices_response.json()
-        if not json_response["items"]:
-            return "null"
-        return json_response["items"][0]["price_info"]["extension_attributes"][
-            "tax_adjustments"
-        ]["final_price"]
-
     def fetch_web_atrribute_value_label(
         self, attribute_code: str, option_id: int | str
     ) -> str | None:
@@ -360,6 +336,31 @@ class MagentoCatalog:
 
         walk(response.json())
 
+    def fetch_all_prices(self, skus: list[str]) -> dict[str, float | str]:
+        """Returns {sku: price} for all SKUs in as few requests as possible."""
+        sku_prices = {}
+        # Magento URLs can get long; chunk SKUs to be safe
+        chunk_size = 50
+        for i in range(0, len(skus), chunk_size):
+            chunk = skus[i : i + chunk_size]
+            criteria = {
+                "searchCriteria[filter_groups][0][filters][0][field]": "sku",
+                "searchCriteria[filter_groups][0][filters][0][value]": ",".join(
+                    chunk
+                ),
+                "searchCriteria[filter_groups][0][filters][0][condition_type]": "in",
+                "store_id": self.mag_store_id,
+                "currencyCode": "GBP",
+                "fields": "items[sku,price_info]",
+            }
+            response = self.session.get(self.mag_prices_ep, params=criteria)
+            for item in response.json().get("items", []):
+                sku = item["sku"]
+                sku_prices[sku] = item["price_info"]["extension_attributes"][
+                    "tax_adjustments"
+                ]["final_price"]
+        return sku_prices
+
 
 class TidioAPI:
 
@@ -411,6 +412,16 @@ def parse_and_write_magento_products(full: bool = False) -> None:
         magento = MagentoCatalog()
         updates = magento.fetch_web_products(full)
         magento.prefetch_all_categories()
+        # Pre-fetch all prices in bulk before the loop
+        attrs_by_sku = {
+            p["sku"]: magento.build_attribute_index(p) for p in updates
+        }
+        skus = [
+            p["sku"]
+            for p in updates
+            if int(attrs_by_sku[p["sku"]].get("priceonapplication", 0)) != 1
+        ]
+        price_map = magento.fetch_all_prices(skus)
         for product in updates:
             if (
                 int(MAGENTO_WEBSITE_ID)
@@ -420,8 +431,6 @@ def parse_and_write_magento_products(full: bool = False) -> None:
                 continue
             logger.info(f"Processing {product['sku']}")
             attrs = magento.build_attribute_index(product)
-            poa = attrs.get("priceonapplication", "0")
-            discontinued = attrs.get("discontinued", "0")
             category_ids = attrs.get("category_ids", [])
             url_key = attrs.get("url_key", "")
             description = attrs.get("description", "")
@@ -447,11 +456,7 @@ def parse_and_write_magento_products(full: bool = False) -> None:
                 "features": magento.extract_features(product),
                 "description": description,
                 "default_currency": "GBP",
-                "price": (
-                    "null"
-                    if poa == 1
-                    else magento.determine_web_product_price(product)
-                ),
+                "price": price_map.get(product["sku"], "null"),
             }
             product_vendor = None
             try:
