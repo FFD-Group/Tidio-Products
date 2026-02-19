@@ -352,19 +352,16 @@ class MagentoCatalog:
     def fetch_all_prices(
         self, skus: list[str], id_to_sku: dict[int, str]
     ) -> dict[str, float | str]:
-        """Returns {sku: price} for all SKUs in as few requests as possible.
-        id_to_sku is a {product_id: sku} map used to key the response, since
-        the prices endpoint does not return sku in its fields-filtered response.
-        """
+        sku_to_id = {sku: pid for pid, sku in id_to_sku.items()}
         sku_prices = {}
-        # Magento URLs can get long; chunk SKUs to be safe
         chunk_size = 50
-        for i in range(0, len(skus), chunk_size):
-            chunk = skus[i : i + chunk_size]
+        ids = [sku_to_id[sku] for sku in skus if sku in sku_to_id]
+        for i in range(0, len(ids), chunk_size):
+            id_chunk = ids[i : i + chunk_size]
             criteria = {
-                "searchCriteria[filter_groups][0][filters][0][field]": "sku",
+                "searchCriteria[filter_groups][0][filters][0][field]": "id",
                 "searchCriteria[filter_groups][0][filters][0][value]": ",".join(
-                    chunk
+                    str(pid) for pid in id_chunk
                 ),
                 "searchCriteria[filter_groups][0][filters][0][condition_type]": "in",
                 "store_id": self.mag_store_id,
@@ -372,7 +369,7 @@ class MagentoCatalog:
                 "fields": "items[id,price_info]",
             }
             response = self.session.get(self.mag_prices_ep, params=criteria)
-            for item in response.json().get("items", []):
+            for item in response.json().get("items") or []:
                 sku = id_to_sku.get(item["id"])
                 if not sku:
                     logger.warning(
@@ -718,7 +715,7 @@ def send_batches(manifest: dict, wd: WorkDrive) -> bool:
             continue
 
         try:
-            tidio.upsert_product_batch(batch_entry["products"])
+            # tidio.upsert_product_batch(batch_entry["products"])
             batch_entry["status"] = "sent"
             batch_entry["sent_at"] = pendulum.now(
                 "Europe/London"
