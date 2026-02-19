@@ -369,6 +369,7 @@ class MagentoCatalog:
                 "fields": "items[id,price_info]",
             }
             response = self.session.get(self.mag_prices_ep, params=criteria)
+            response.raise_for_status()
             for item in response.json().get("items") or []:
                 sku = id_to_sku.get(item["id"])
                 if not sku:
@@ -416,9 +417,15 @@ class TidioAPI:
             headers=self.headers,
             data=payload,
         )
-        if raw_response.status_code == 400:
-            logger.error("Upsert failed with HTTP Error 400.")
-            raise requests.HTTPError("Bad request, check the payload.")
+        try:
+            raw_response.raise_for_status()
+        except requests.HTTPError:
+            logger.error(
+                "Upsert failed with HTTP %s. Response body: %s",
+                raw_response.status_code,
+                raw_response.text,
+            )
+            raise
         logger.info(
             f"Upserted batch of {number_of_products} products to Tidio API."
         )
