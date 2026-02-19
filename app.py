@@ -371,7 +371,7 @@ class MagentoCatalog:
                 "fields": "items[id,price_info]",
             }
             response = self.session.get(self.mag_prices_ep, params=criteria)
-            for item in response.json().get("items", []):
+            for item in response.json().get("items") or []:
                 sku = id_to_sku.get(item["id"])
                 if not sku:
                     logger.warning(
