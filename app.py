@@ -352,16 +352,14 @@ class MagentoCatalog:
     def fetch_all_prices(
         self, skus: list[str], id_to_sku: dict[int, str]
     ) -> dict[str, float | str]:
-        sku_to_id = {sku: pid for pid, sku in id_to_sku.items()}
         sku_prices = {}
         chunk_size = 50
-        ids = [sku_to_id[sku] for sku in skus if sku in sku_to_id]
-        for i in range(0, len(ids), chunk_size):
-            id_chunk = ids[i : i + chunk_size]
+        for i in range(0, len(skus), chunk_size):
+            chunk = skus[i : i + chunk_size]
             criteria = {
-                "searchCriteria[filter_groups][0][filters][0][field]": "id",
+                "searchCriteria[filter_groups][0][filters][0][field]": "sku",
                 "searchCriteria[filter_groups][0][filters][0][value]": ",".join(
-                    str(pid) for pid in id_chunk
+                    chunk
                 ),
                 "searchCriteria[filter_groups][0][filters][0][condition_type]": "in",
                 "store_id": self.mag_store_id,
