@@ -63,6 +63,7 @@ MAGENTO_DOMAIN = os.getenv("WEB_DOMAIN")
 TIMEZONE = pendulum.timezone("Europe/London")
 UPDATE_AGE_MINS = os.getenv("UPDATE_AGE_MINS")
 EXCLUDED_FEATURES = json.loads(os.getenv("EXCLUDED_FEATURES"))
+COLLECTIONS_PARENT_CATEGORY = os.getenv("COLLECTIONS_PARENT_CATEGORY", "collections")
 MAG_BRAND_ATTRIBUTE_CODE = os.getenv("MAG_BRAND_ATTRIBUTE_CODE")
 MAGENTO_WEBSITE_ID = os.getenv("MAG_WEBSITE_ID")
 BATCHES_FILE = "saved_batches.json"
@@ -121,6 +122,7 @@ class MagentoCatalog:
         )
         self.mag_store_id = os.getenv("MAG_STORE_ID")
         self.category_id_name_map = {}  # {category_id: category name}
+        self.collection_category_ids: set = set()  # IDs under the collections parent
         self.attribute_value_label_map = {}
         self.attribute_options_map = (
             {}
@@ -347,13 +349,19 @@ class MagentoCatalog:
         """Loads the full category tree into the memoization map in one request."""
         response = self.session.get(self.mag_categories_ep)
 
-        def walk(node):
+        def walk(node, under_collections=False):
             self.category_id_name_map[node["id"]] = node["name"]
             self.category_id_name_map[str(node["id"])] = node[
                 "name"
             ]  # handle str keys too
+            if under_collections:
+                self.collection_category_ids.add(node["id"])
+                self.collection_category_ids.add(str(node["id"]))
+            is_collections = (
+                node["name"].lower() == COLLECTIONS_PARENT_CATEGORY.lower()
+            )
             for child in node.get("children_data", []):
-                walk(child)
+                walk(child, under_collections=under_collections or is_collections)
 
         walk(response.json())
 
@@ -471,6 +479,8 @@ def parse_and_write_magento_products(full: bool = False) -> None:
             description = attrs.get("description", "")
             product_categories = []
             for id in category_ids:
+                if id in magento.collection_category_ids:
+                    continue
                 category_name = magento.fetch_web_category_name(id)
                 product_categories.append(category_name)
             lowest_category_name = (
