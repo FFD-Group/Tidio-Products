@@ -419,6 +419,9 @@ class TidioAPI:
         )
         try:
             raw_response.raise_for_status()
+            logger.info(
+                f"Upserted batch of {number_of_products} products to Tidio API."
+            )
         except requests.HTTPError:
             logger.error(
                 "Upsert failed with HTTP %s. Response body: %s",
@@ -426,9 +429,6 @@ class TidioAPI:
                 raw_response.text,
             )
             raise
-        logger.info(
-            f"Upserted batch of {number_of_products} products to Tidio API."
-        )
         logger.debug(raw_response)
         logger.debug(raw_response.content)
 
@@ -717,7 +717,7 @@ def send_batches(manifest: dict, wd: WorkDrive) -> bool:
     for batch_entry in manifest["batches"]:
         if batch_entry["status"] == "sent":
             logger.info(
-                f"Skipping batch {batch_entry['index']}/{total} (already sent)"
+                f"Skipping batch {batch_entry['index'] + 1}/{total} (already sent)"
             )
             continue
 
@@ -733,7 +733,7 @@ def send_batches(manifest: dict, wd: WorkDrive) -> bool:
         except Exception as e:
             batch_entry["status"] = "failed"
             all_ok = False
-            logger.error(f"Batch {batch_entry['index']} failed: {e}")
+            logger.error(f"Batch {batch_entry['index'] + 1} failed: {e}")
         finally:
             # Always flush to disk
             with open(BATCHES_FILE, "w") as f:
