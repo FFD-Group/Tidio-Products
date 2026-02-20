@@ -485,9 +485,6 @@ def parse_and_write_magento_products(full: bool = False) -> None:
                 "updated_at": magento.iso8601_format_updated_at(
                     product["updated_at"]
                 ),
-                "image_url": magento.determine_web_product_image_url(
-                    product["media_gallery_entries"]
-                ),
                 "features": magento.extract_features(product),
                 "description": description,
                 "default_currency": "GBP",
@@ -505,6 +502,15 @@ def parse_and_write_magento_products(full: bool = False) -> None:
                 logger.info("No brand value found for product.")
             if product_vendor:
                 tidio_product["vendor"] = product_vendor
+            image_url = None
+            try:
+                image_url = magento.determine_web_product_image_url(
+                    product["media_gallery_entries"]
+                )
+            except Exception as e:
+                logger.info("No image URL for product.")
+            if image_url:
+                tidio_product["image_url"] = image_url
             if lowest_category_name:
                 tidio_product["product_type"] = lowest_category_name
             output_json.append(tidio_product)
