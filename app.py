@@ -326,8 +326,8 @@ class MagentoCatalog:
                 value = label if label else attr["value"]
                 key = attr["attribute_code"].replace("filt_", "")
                 logger.debug(f"Adding feature {key}: {label}.")
-                if 250 > len(value):
-                    value = value[:249]
+                if len(value) > 250:
+                    value = value[:250]
                 features[key] = value
         return features
 
@@ -485,7 +485,7 @@ def parse_and_write_magento_products(full: bool = False) -> None:
                 "features": magento.extract_features(product),
                 "description": description,
                 "default_currency": "GBP",
-                "price": price_map.get(product["sku"], "null"),
+                "price": price_map.get(product["sku"], None),
             }
             product_vendor = None
             try:
