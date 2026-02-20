@@ -91,9 +91,15 @@ class MagentoCatalog:
             "searchCriteria[filter_groups][0][filters][0][field]": "status",
             "searchCriteria[filter_groups][0][filters][0][value]": 1,  # enabled
             "searchCriteria[filter_groups][0][filters][0][condition_type]": "eq",
+            # AND (
             "searchCriteria[filter_groups][1][filters][0][field]": "visibility",
             "searchCriteria[filter_groups][1][filters][0][value]": 4,  # catalog, search
             "searchCriteria[filter_groups][1][filters][0][condition_type]": "eq",
+            # OR
+            "searchCriteria[filter_groups][1][filters][1][field]": "visibility",
+            "searchCriteria[filter_groups][1][filters][1][value]": 2,  # catalog
+            "searchCriteria[filter_groups][1][filters][1][condition_type]": "eq",
+            # )
             "fields": self.mag_product_fields,
         }
         self.mag_products_updated_criteria = {
