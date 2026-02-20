@@ -122,6 +122,7 @@ class MagentoCatalog:
         )
         self.mag_store_id = os.getenv("MAG_STORE_ID")
         self.category_id_name_map = {}  # {category_id: category name}
+        self.category_id_depth_map: dict = {}  # {category_id: depth in tree}
         self.collection_category_ids: set = set()  # IDs under the collections parent
         self.attribute_value_label_map = {}
         self.attribute_options_map = (
@@ -349,11 +350,13 @@ class MagentoCatalog:
         """Loads the full category tree into the memoization map in one request."""
         response = self.session.get(self.mag_categories_ep)
 
-        def walk(node, under_collections=False):
+        def walk(node, depth=0, under_collections=False):
             self.category_id_name_map[node["id"]] = node["name"]
             self.category_id_name_map[str(node["id"])] = node[
                 "name"
             ]  # handle str keys too
+            self.category_id_depth_map[node["id"]] = depth
+            self.category_id_depth_map[str(node["id"])] = depth
             if under_collections:
                 self.collection_category_ids.add(node["id"])
                 self.collection_category_ids.add(str(node["id"]))
@@ -361,7 +364,11 @@ class MagentoCatalog:
                 node["name"].lower() == COLLECTIONS_PARENT_CATEGORY.lower()
             )
             for child in node.get("children_data", []):
-                walk(child, under_collections=under_collections or is_collections)
+                walk(
+                    child,
+                    depth=depth + 1,
+                    under_collections=under_collections or is_collections,
+                )
 
         walk(response.json())
 
@@ -482,9 +489,12 @@ def parse_and_write_magento_products(full: bool = False) -> None:
                 if id in magento.collection_category_ids:
                     continue
                 category_name = magento.fetch_web_category_name(id)
-                product_categories.append(category_name)
-            lowest_category_name = (
-                product_categories[-1] if len(product_categories) > 0 else None
+                depth = magento.category_id_depth_map.get(id, 0)
+                product_categories.append((depth, category_name))
+            deepest_category_name = (
+                max(product_categories, key=lambda x: x[0])[1]
+                if product_categories
+                else None
             )
             tidio_product = {
                 "id": product["id"],
@@ -521,8 +531,8 @@ def parse_and_write_magento_products(full: bool = False) -> None:
                 logger.info("No image URL for product.")
             if image_url:
                 tidio_product["image_url"] = image_url
-            if lowest_category_name:
-                tidio_product["product_type"] = lowest_category_name
+            if deepest_category_name:
+                tidio_product["product_type"] = deepest_category_name
             output_json.append(tidio_product)
     except Exception as e:
         logger.error(f"Something went wrong getting the products. {e}")
