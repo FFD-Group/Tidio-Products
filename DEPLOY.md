@@ -1,7 +1,7 @@
 # Tidio Product Sync – Deployment Guide
 
 Deploys the sync script as a Podman container on the Hetzner VPS. The container
-runs **supercronic** (a daemonless cron runner) to fire:
+runs a pure-Python scheduler (`entrypoint.py`) to fire:
 
 - **Incremental sync** every 2 hours (00:00, 04:00, 06:00 … 22:00)
 - **Full catalog sync** daily at 02:00 (replaces the 02:00 incremental slot)
@@ -123,8 +123,8 @@ cd ~/tidio-sync/src
 podman build -t tidio-sync:latest .
 ```
 
-> **ARM node?** If the Hetzner VPS uses an ARM CPU, add
-> `--build-arg SUPERCRONIC_ARCH=arm64` to the build command.
+> **ARM node?** The image uses the official `python:3.12-slim` base which is
+> multi-arch, so no build flags are needed for ARM.
 
 ---
 
