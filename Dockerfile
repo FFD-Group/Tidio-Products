@@ -36,7 +36,9 @@ COPY app.py .
 RUN mkdir -p /app/logs
 
 # Crontab consumed by supercronic
+# Strip any Windows CRLF line endings that survive copy/git checkout
 COPY crontab /app/crontab
+RUN sed -i 's/\r//' /app/crontab
 
 # supercronic runs in the foreground and forwards all job output to stdout/stderr
 CMD ["supercronic", "/app/crontab"]

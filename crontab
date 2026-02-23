@@ -1,9 +1,5 @@
-# Tidio Product Sync – supercronic crontab
-#
-# Incremental sync: every 2 hours at :00, skipping 02:00 (replaced by full sync)
-# Full sync:        02:00 daily
-#
-# supercronic forwards all stdout/stderr to the container log automatically.
-# ─────────────────────────────────────────────────────────────────────
-0 0,4,6,8,10,12,14,16,18,20,22 * * * python /app/app.py
-0 2 * * *                               python /app/app.py --full
+# Tidio Product Sync - supercronic crontab
+# Incremental sync: every 2 hours, skipping 02:00 (replaced by full sync)
+# Full sync: 02:00 daily
+0 0,4,6,8,10,12,14,16,18,20,22 * * * /usr/local/bin/python /app/app.py
+0 2 * * * /usr/local/bin/python /app/app.py --full
