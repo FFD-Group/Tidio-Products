@@ -31,7 +31,8 @@ formatter = logging.Formatter(LOG_FORMAT, datefmt="%Y-%m-%dT%H:%M:%S%z")
 stream_handler = logging.StreamHandler(sys.stdout)
 stream_handler.setFormatter(formatter)
 
-file_handler = logging.FileHandler("tidio_products.log")
+LOG_FILE = os.getenv("LOG_FILE", "tidio_products.log")
+file_handler = logging.FileHandler(LOG_FILE)
 file_handler.setFormatter(formatter)
 
 logger = logging.getLogger()
@@ -63,10 +64,75 @@ MAGENTO_DOMAIN = os.getenv("WEB_DOMAIN")
 TIMEZONE = pendulum.timezone("Europe/London")
 UPDATE_AGE_MINS = os.getenv("UPDATE_AGE_MINS")
 EXCLUDED_FEATURES = json.loads(os.getenv("EXCLUDED_FEATURES"))
-COLLECTIONS_PARENT_CATEGORY = os.getenv("COLLECTIONS_PARENT_CATEGORY", "collections")
+COLLECTIONS_PARENT_CATEGORY = os.getenv(
+    "COLLECTIONS_PARENT_CATEGORY", "collections"
+)
 MAG_BRAND_ATTRIBUTE_CODE = os.getenv("MAG_BRAND_ATTRIBUTE_CODE")
 MAGENTO_WEBSITE_ID = os.getenv("MAG_WEBSITE_ID")
 BATCHES_FILE = "saved_batches.json"
+
+# Zoho Flow / Cliq notifications
+ZOHO_FLOW_WEBHOOK_URL = os.getenv("ZOHO_FLOW_WEBHOOK_URL")
+# Set NOTIFY_ON_EMPTY=true to receive a notification when an incremental
+# sync finds zero updated products (quiet by default).
+NOTIFY_ON_EMPTY = os.getenv("NOTIFY_ON_EMPTY", "false").lower() == "true"
+
+
+# ---------------------------------------------------------------------------
+# Notification helper
+# ---------------------------------------------------------------------------
+
+
+def send_flow_notification(
+    status: str,
+    sync_type: str,
+    products_synced: int = 0,
+    failed_batches: list | None = None,
+    resume_file_id: str | None = None,
+) -> None:
+    """POST a structured notification payload to a Zoho Flow webhook.
+
+    Payload fields (all available as Flow variables):
+      status           "success" | "failure" | "no_updates"
+      sync_type        "incremental" | "full"
+      products_synced  integer count of products successfully upserted
+      failed_batches   list of batch indices that failed (empty on success)
+      resume_command   CLI command to resume from a failed run, or null
+      timestamp        ISO-8601 timestamp (Europe/London)
+    """
+    if not ZOHO_FLOW_WEBHOOK_URL:
+        logger.warning("ZOHO_FLOW_WEBHOOK_URL not set; skipping notification.")
+        return
+
+    resume_command = None
+    if resume_file_id:
+        resume_command = f"python app.py --resume {resume_file_id}"
+
+    payload = {
+        "status": status,
+        "sync_type": sync_type,
+        "products_synced": products_synced,
+        "failed_batches": failed_batches or [],
+        "resume_command": resume_command,
+        "timestamp": pendulum.now("Europe/London").to_iso8601_string(),
+    }
+
+    try:
+        response = requests.post(
+            ZOHO_FLOW_WEBHOOK_URL,
+            json=payload,
+            timeout=15,
+        )
+        response.raise_for_status()
+        logger.info("Zoho Flow notification sent (status=%s).", status)
+    except Exception as exc:
+        # Never let a notification failure crash the main process.
+        logger.error("Failed to send Zoho Flow notification: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Magento catalog
+# ---------------------------------------------------------------------------
 
 
 class MagentoCatalog:
@@ -123,7 +189,9 @@ class MagentoCatalog:
         self.mag_store_id = os.getenv("MAG_STORE_ID")
         self.category_id_name_map = {}  # {category_id: category name}
         self.category_id_depth_map: dict = {}  # {category_id: depth in tree}
-        self.collection_category_ids: set = set()  # IDs under the collections parent
+        self.collection_category_ids: set = (
+            set()
+        )  # IDs under the collections parent
         self.attribute_value_label_map = {}
         self.attribute_options_map = (
             {}
@@ -404,6 +472,11 @@ class MagentoCatalog:
         return sku_prices
 
 
+# ---------------------------------------------------------------------------
+# Tidio API
+# ---------------------------------------------------------------------------
+
+
 class TidioAPI:
 
     def __init__(self):
@@ -454,8 +527,21 @@ class TidioAPI:
         logger.debug(raw_response.content)
 
 
-def parse_and_write_magento_products(full: bool = False) -> None:
+# ---------------------------------------------------------------------------
+# Product processing
+# ---------------------------------------------------------------------------
+
+
+def parse_and_write_magento_products(full: bool = False) -> tuple[bool, int]:
+    """Fetch products from Magento, transform them, and write to OUTPUT_FILE.
+
+    Returns:
+        (success, product_count) success is False if an unrecoverable error
+        occurred during fetching/processing; product_count is the number of
+        products written to disk (may be 0 on failure).
+    """
     output_json = []
+    success = False
     try:
         magento = MagentoCatalog()
         updates = magento.fetch_web_products(full)
@@ -534,12 +620,20 @@ def parse_and_write_magento_products(full: bool = False) -> None:
             if deepest_category_name:
                 tidio_product["product_type"] = deepest_category_name
             output_json.append(tidio_product)
+        success = True
     except Exception as e:
         logger.error(f"Something went wrong getting the products. {e}")
     finally:
         logger.info("Writing output so far.")
         with open(OUTPUT_FILE, "w") as output_file:
             output_file.write(json.dumps(output_json))
+
+    return success, len(output_json)
+
+
+# ---------------------------------------------------------------------------
+# WorkDrive
+# ---------------------------------------------------------------------------
 
 
 class WorkDrive:
@@ -709,6 +803,11 @@ class WorkDrive:
         return json.loads(r.content)["data"]
 
 
+# ---------------------------------------------------------------------------
+# Batch helpers
+# ---------------------------------------------------------------------------
+
+
 def create_batches(products):
     logger.info("Batching products in preparation for API...")
     # Batch products
@@ -802,6 +901,10 @@ def download_manifest(wd: WorkDrive, file_id: str) -> dict:
         return json.load(f)
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
@@ -810,6 +913,8 @@ if __name__ == "__main__":
         "--resume", type=str, default=None, metavar="WORKDRIVE_FILE_ID"
     )
     args = parser.parse_args()
+
+    sync_type = "full" if args.full else "incremental"
 
     wd = WorkDrive()
 
@@ -820,11 +925,32 @@ if __name__ == "__main__":
         logger.info(
             f"Resuming: {pending} of {manifest['meta']['total_batches']} batches remaining"
         )
+        # Preserve sync_type from manifest if available
+        sync_type = manifest.get("meta", {}).get("sync_type", sync_type)
     else:
-        logger.info(
-            f"Starting {'full' if args.full else 'incremental'} sync..."
+        logger.info(f"Starting {sync_type} sync...")
+        fetch_ok, product_count = parse_and_write_magento_products(
+            full=args.full
         )
-        parse_and_write_magento_products(full=args.full)
+
+        if not fetch_ok:
+            logger.error("Aborting: product fetch/processing failed.")
+            send_flow_notification(
+                status="failure",
+                sync_type=sync_type,
+                failed_batches=["fetch_error"],
+            )
+            sys.exit(1)
+
+        if product_count == 0:
+            logger.info("No products to sync; exiting.")
+            if NOTIFY_ON_EMPTY:
+                send_flow_notification(
+                    status="no_updates",
+                    sync_type=sync_type,
+                    products_synced=0,
+                )
+            sys.exit(0)
 
         with open(OUTPUT_FILE, "r") as f:
             products = json.load(f)
@@ -838,7 +964,7 @@ if __name__ == "__main__":
                 "total_products": len(products),
                 "total_batches": len(batched),
                 "created_at": pendulum.now("Europe/London").to_iso8601_string(),
-                "sync_type": "full" if args.full else "incremental",
+                "sync_type": sync_type,
             },
             "batches": [
                 {
@@ -854,9 +980,16 @@ if __name__ == "__main__":
 
     all_ok = send_batches(manifest, wd)
 
+    total_products = manifest["meta"]["total_products"]
+
     if all_ok:
         logger.info("Sync completed successfully.")
         upload_manifest(wd, manifest)  # final record
+        send_flow_notification(
+            status="success",
+            sync_type=sync_type,
+            products_synced=total_products,
+        )
     else:
         failed = [
             b["index"] for b in manifest["batches"] if b["status"] == "failed"
@@ -866,4 +999,13 @@ if __name__ == "__main__":
             f"Sync completed with failures on batches {failed}. "
             f"To resume, run: python app.py --resume {file_id}"
         )
-        sys.exit(1)  # non-zero so can detect failure
+        send_flow_notification(
+            status="failure",
+            sync_type=sync_type,
+            products_synced=sum(
+                b["size"] for b in manifest["batches"] if b["status"] == "sent"
+            ),
+            failed_batches=failed,
+            resume_file_id=file_id,
+        )
+        sys.exit(1)  # non-zero so cron/systemd can detect failure
